@@ -29,6 +29,77 @@
 #define DEBUG (!!EnbuggerDebugMode)
 I32 EnbuggerDebugMode = 0;
 
+static void
+S_init_dbargs(pTHX)
+{
+    AV *const args = PL_dbargs = GvAV(gv_AVadd((gv_fetchpvs("DB::args",
+                                                            GV_ADDMULTI,
+                                                            SVt_PVAV))));
+
+    if (AvREAL(args)) {
+        /* Someone has already created it.
+           It might have entries, and if we just turn off AvREAL(), they will
+           "leak" until global destruction.  */
+        av_clear(args);
+        if (SvTIED_mg((const SV *)args, PERL_MAGIC_tied))
+            Perl_croak(aTHX_ "Cannot set tied @DB::args");
+    }
+    AvREIFY_only(PL_dbargs);
+}
+
+void
+Perl_init_debugger(pTHX)
+{
+    HV * const ostash = PL_curstash;
+    MAGIC *mg;
+
+    /* Only initialize if not already done */
+    if (PL_DBgv && PL_DBline && PL_DBsub && PL_DBsingle && PL_DBtrace && PL_DBsignal)
+        return;
+
+    PL_curstash = (HV *)SvREFCNT_inc_simple(PL_debstash);
+
+    S_init_dbargs(aTHX);
+
+    /* Match original Perl behavior: just set these without decrementing old values.
+     * The original Perl assumes init_debugger is called only once at startup.
+     * We guard against multiple calls with the check above. */
+    PL_DBgv = GvREFCNT_inc(gv_fetchpvs("DB::DB", GV_ADDMULTI, SVt_PVGV));
+    PL_DBline = GvREFCNT_inc(gv_fetchpvs("DB::dbline", GV_ADDMULTI, SVt_PVAV));
+    PL_DBsub = GvREFCNT_inc(gv_HVadd(gv_fetchpvs("DB::sub", GV_ADDMULTI, SVt_PVHV)));
+
+    PL_DBsingle = GvSV((gv_fetchpvs("DB::single", GV_ADDMULTI, SVt_PV)));
+    if (!SvIOK(PL_DBsingle))
+        sv_setiv(PL_DBsingle, 0);
+    /* Only add magic if not already present */
+    if (!SvMAGICAL(PL_DBsingle) || !mg_find(PL_DBsingle, PERL_MAGIC_debugvar)) {
+        mg = sv_magicext(PL_DBsingle, NULL, PERL_MAGIC_debugvar, &PL_vtbl_debugvar, 0, 0);
+        mg->mg_private = DBVARMG_SINGLE;
+        SvSETMAGIC(PL_DBsingle);
+    }
+
+    PL_DBtrace = GvSV((gv_fetchpvs("DB::trace", GV_ADDMULTI, SVt_PV)));
+    if (!SvIOK(PL_DBtrace))
+        sv_setiv(PL_DBtrace, 0);
+    if (!SvMAGICAL(PL_DBtrace) || !mg_find(PL_DBtrace, PERL_MAGIC_debugvar)) {
+        mg = sv_magicext(PL_DBtrace, NULL, PERL_MAGIC_debugvar, &PL_vtbl_debugvar, 0, 0);
+        mg->mg_private = DBVARMG_TRACE;
+        SvSETMAGIC(PL_DBtrace);
+    }
+
+    PL_DBsignal = GvSV((gv_fetchpvs("DB::signal", GV_ADDMULTI, SVt_PV)));
+    if (!SvIOK(PL_DBsignal))
+        sv_setiv(PL_DBsignal, 0);
+    if (!SvMAGICAL(PL_DBsignal) || !mg_find(PL_DBsignal, PERL_MAGIC_debugvar)) {
+        mg = sv_magicext(PL_DBsignal, NULL, PERL_MAGIC_debugvar, &PL_vtbl_debugvar, 0, 0);
+        mg->mg_private = DBVARMG_SIGNAL;
+        SvSETMAGIC(PL_DBsignal);
+    }
+
+    SvREFCNT_dec(PL_curstash);
+    PL_curstash = ostash;
+}
+
 
 /*
  * The ENBUGGER_DEBUG environment variable toggles debugging. It is
@@ -84,15 +155,13 @@ alter_cop( pTHX_ SV *rv, I32 op_type )
 
 
   /*
-   * Change the type of the COP and the function pointer.
-   *
-   * TODO: stop hardcoding the values OP_DBSTATE and Perl_pp*. This
-   * could be the result of a lookup function. It is allowed 
+   * Change only the function pointer, NOT the op_type.
+   * Changing op_type can confuse Perl's op cleanup code during perl_destruct
+   * and cause crashes in Perl_pad_free.
    */
   cop = INT2PTR( COP*, SvIV(sv) );
-  cop->op_type = op_type;
-  cop->op_ppaddr =
-    op_type == OP_DBSTATE ? Perl_pp_dbstate : Perl_pp_nextstate;
+  /* cop->op_type = op_type; */  /* Don't change op_type - causes cleanup crashes */
+  cop->op_ppaddr = PL_ppaddr[op_type];
 
   return;
 }
@@ -112,9 +181,10 @@ alter_cop( pTHX_ SV *rv, I32 op_type )
  */
 static void
 compile_with_nextstate() {
+  Perl_ppaddr_t fn_nextstate = PL_ppaddr[OP_NEXTSTATE];
   PL_ppaddr[OP_NEXTSTATE]
     = PL_ppaddr[OP_DBSTATE]
-    = Perl_pp_nextstate;
+    = fn_nextstate;
 }
 
 
@@ -123,9 +193,10 @@ compile_with_nextstate() {
  */
 static void
 compile_with_dbstate() {
+  Perl_ppaddr_t fn_dbstate = PL_ppaddr[OP_DBSTATE];
   PL_ppaddr[OP_NEXTSTATE]
     = PL_ppaddr[OP_DBSTATE]
-    = Perl_pp_dbstate;
+    = fn_dbstate;
 }
 
 
@@ -219,25 +290,52 @@ Enbugger_init_debugger( SV* class )
     PL_perldb = PERLDB_ALL;
 
 
+=pod
+
+Set the internal debugger signal flag directly, bypassing magic.
+This is needed because Perl 5.42+ has magic on $DB::signal that
+resets the value.
+
+=cut
+
+void
+Enbugger_set_dbsignal( SV* class, IV value )
+  CODE:
+    PL_DBsignal_iv = value;
+
+void
+Enbugger_set_dbsingle( SV* class, IV value )
+  CODE:
+    PL_DBsingle_iv = value;
+
+
 
 
 =pod
 
 Sets RMAGIC on the %_<$filename hashes.
+The array reference is required because the dbfile magic's MG_OBJ
+must point to the corresponding array for magic_setdbline to work.
 
 =cut
 
 void
-Enbugger_set_magic_dbfile(rv)
-    SV *rv
+Enbugger_set_magic_dbfile(hv_ref, av_ref)
+    SV *hv_ref
+    SV *av_ref
   INIT:
     HV *hv;
+    AV *av;
   CODE:
-    assert(SvROK(rv));
+    assert(SvROK(hv_ref));
+    assert(SvROK(av_ref));
 
-    hv = (HV*) SvRV(rv);
+    hv = (HV*) SvRV(hv_ref);
+    av = (AV*) SvRV(av_ref);
     assert(SVt_PVHV == SvTYPE(hv));
-    hv_magic(hv, NULL, PERL_MAGIC_dbfile);
+    assert(SVt_PVAV == SvTYPE(av));
+    /* Pass the array as mg_obj so magic_setdbline can find it */
+    hv_magic(hv, (GV*)av, PERL_MAGIC_dbfile);
 
 
 

@@ -95,6 +95,10 @@ sub ExceptionHandler {
     # Log the current exception.
     Enbugger->write( Carp::longmess("Received signal $_[0]") );
     
+    # Set $@ before stopping so it's available to debugger commands
+    # For __DIE__, $_[0] contains the exception message
+    # For other signals, $_[0] contains the signal name
+    $@ = $_[0];
     
     # Trigger the debugger. I did some trial and error to get
     # this. perl5db.pl pays attention to $DB::signal. $^P gets set (if
@@ -103,7 +107,6 @@ sub ExceptionHandler {
     # found that I'd get popped out of the debugger. Whoops.
     Enbugger->stop;
 
-    $@ = $_[0];
     DB::DB();
 }
 

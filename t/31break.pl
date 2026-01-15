@@ -83,7 +83,7 @@ After loading Enbugger, C<< Enbugger->load_perl5db >> will also be called.
 	no warnings 'once';
 	@DB::typeahead = (
 	    'l 1-200',
-	    'b sub_d',
+	    'b main::sub_d',
 	    'c',
 	    '$main::Caught = $main::Value',
 	    'c',

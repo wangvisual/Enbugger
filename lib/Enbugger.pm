@@ -363,7 +363,7 @@ sub initialize_dbline {
      if ( not defined $file ) {
          *DB::dbline = [];
          *DB::dbline = {};
-         Enbugger::set_magic_dbfile( \%DB::dbline );
+         Enbugger::set_magic_dbfile( \%DB::dbline, \@DB::dbline );
      }
      else {
          no strict 'refs';
@@ -406,7 +406,8 @@ sub load_file {
 
     if ( ! *$glob{HASH} ) {
         my %breakpoints;
-        Enbugger::set_magic_dbfile(\%breakpoints);
+        # Pass both hash and array refs - the magic needs the array reference
+        Enbugger::set_magic_dbfile(\%breakpoints, \@{$symname});
         *$glob = \%breakpoints;
     }
     
@@ -533,6 +534,11 @@ BEGIN {
 
 # Anything compiled after this statement runs will be debuggable.
 Enbugger->_compile_with_dbstate();
+
+# Restore ppaddr table during cleanup to prevent crashes in perl_destruct
+END {
+    Enbugger->_compile_with_nextstate() if defined &Enbugger::_compile_with_nextstate;
+}
 
 ## Local Variables:
 ## mode: cperl

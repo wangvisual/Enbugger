@@ -64,10 +64,12 @@ sub _load_debugger {
 =cut
 
 1 if $DB::signal;
-sub _stop {
 
+sub _stop {
     # perl5db looks for this to stop.
-    $DB::signal = 1;
+    # Use XS function to set the internal flag directly, bypassing magic
+    # that would reset the value in Perl 5.42+
+    Enbugger->set_dbsignal(1);
 
     # Use at least the default debug flags.
     $^P |= 0x33f;
